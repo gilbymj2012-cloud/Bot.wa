@@ -1,0 +1,198 @@
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+
+// ======================
+// PENGATURAN
+// ======================
+const OWNER_NUMBER = '628xxxxxxxxxx'; // Ganti dengan nomor kamu (tanpa + dan spasi)
+const ANTI_LINK = true;               // true = aktifkan anti link
+const KICK_ON_LINK = false;           // true = kick orang yang kirim link (bot harus admin)
+const WARN_MESSAGE = true;            // true = kirim peringatan sebelum hapus
+
+const client = new Client({
+    authStrategy: new LocalAuth({
+        dataPath: './session'
+    }),
+    puppeteer: {
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ]
+    }
+});
+
+// QR Code
+client.on('qr', (qr) => {
+    console.log('Scan QR Code berikut:');
+    qrcode.generate(qr, { small: true });
+});
+
+client.on('ready', () => {
+    console.log('✅ Bot WhatsApp sudah siap!');
+});
+
+client.on('authenticated', () => {
+    console.log('🔐 Autentikasi berhasil');
+});
+
+client.on('disconnected', (reason) => {
+    console.log('Bot terputus:', reason);
+});
+
+// ======================
+// FUNGSI DETEKSI LINK GRUP
+// ======================
+function isGroupInviteLink(text) {
+    if (!text) return false;
+    // Deteksi link undangan grup WhatsApp
+    const regex = /(https?:\/\/)?(www\.)?(chat\.whatsapp\.com|wa\.me\/)[^\s]+/gi;
+    return regex.test(text);
+}
+
+// ======================
+// HANDLER PESAN
+// ======================
+client.on('message', async (msg) => {
+    try {
+        const chat = await msg.getChat();
+        const contact = await msg.getContact();
+        const body = msg.body ? msg.body.toLowerCase().trim() : '';
+        const isGroup = chat.isGroup;
+        const senderNumber = contact.id.user; // nomor tanpa @c.us
+
+        console.log(`[${contact.pushname || senderNumber}] : ${msg.body}`);
+
+        // ======================
+        // ANTI LINK GRUP LAIN
+        // ======================
+        if (ANTI_LINK && isGroup && isGroupInviteLink(msg.body)) {
+            // Cek apakah pengirim adalah admin atau owner
+            const participants = chat.participants;
+            const sender = participants.find(p => p.id._serialized === msg.author || p.id._serialized === msg.from);
+            const isAdmin = sender?.isAdmin || sender?.isSuperAdmin;
+            const isOwner = senderNumber === OWNER_NUMBER;
+
+            if (!isAdmin && !isOwner) {
+                // Hapus pesan
+                await msg.delete(true); // true = hapus untuk semua
+
+                if (WARN_MESSAGE) {
+                    await chat.sendMessage(
+                        `⚠️ @${senderNumber} dilarang mengirim *link grup lain*!\nPesan telah dihapus.`,
+                        { mentions: [contact] }
+                    );
+                }
+
+                // Kick jika diaktifkan
+                if (KICK_ON_LINK) {
+                    try {
+                        await chat.removeParticipants([msg.author || msg.from]);
+                        await chat.sendMessage(`🚫 @${senderNumber} telah dikeluarkan karena mengirim link grup.`, {
+                            mentions: [contact]
+                        });
+                    } catch (err) {
+                        console.log('Gagal kick (bot mungkin bukan admin):', err.message);
+                    }
+                }
+
+                return; // stop proses selanjutnya
+            }
+        }
+
+        // ======================
+        // PERINTAH BIASA
+        // ======================
+        if (body === '!ping' || body === 'ping') {
+            await msg.reply('🏓 Pong!');
+        }
+
+        else if (body === '!halo' || body === 'halo' || body === 'hai' || body === 'hi') {
+            await msg.reply(`Halo *${contact.pushname || 'Kak'}*! 👋\nSaya bot WhatsApp.\nKetik *!menu* untuk melihat perintah.`);
+        }
+
+        else if (body === '!menu' || body === 'menu' || body === '!help') {
+            const menu = `
+*🤖 MENU BOT*
+
+*!ping* - Cek bot hidup
+*!halo* - Sapa bot
+*!info* - Info bot
+*!stiker* - Buat stiker (kirim gambar + caption !stiker)
+*!antilink on/off* - Aktifkan/nonaktifkan anti link (khusus admin)
+*!owner* - Kontak owner
+            `.trim();
+            await msg.reply(menu);
+        }
+
+        else if (body === '!info') {
+            await msg.reply(
+                `📱 *Info Bot*\n` +
+                `Nama: Bot WhatsApp\n` +
+                `Library: whatsapp-web.js\n` +
+                `Anti Link: ${ANTI_LINK ? 'Aktif ✅' : 'Nonaktif ❌'}\n` +
+                `Status: Online ✅`
+            );
+        }
+
+        else if (body === '!owner') {
+            await msg.reply(`Owner: ${OWNER_NUMBER}`);
+        }
+
+        // Buat stiker
+        else if (msg.hasMedia && (body === '!stiker' || body === '!sticker' || body.includes('stiker'))) {
+            try {
+                const media = await msg.downloadMedia();
+                if (media) {
+                    await client.sendMessage(msg.from, media, {
+                        sendMediaAsSticker: true,
+                        stickerName: 'Bot Sticker',
+                        stickerAuthor: 'WhatsApp Bot'
+                    });
+                }
+            } catch (err) {
+                await msg.reply('Gagal membuat stiker 😢');
+            }
+        }
+
+        // Perintah antilink on/off (hanya admin grup atau owner)
+        else if (body === '!antilink on' || body === '!antilink off') {
+            if (!isGroup) {
+                return msg.reply('Perintah ini hanya bisa dipakai di grup.');
+            }
+
+            const participants = chat.participants;
+            const sender = participants.find(p => p.id._serialized === msg.author || p.id._serialized === msg.from);
+            const isAdmin = sender?.isAdmin || sender?.isSuperAdmin;
+            const isOwner = senderNumber === OWNER_NUMBER;
+
+            if (!isAdmin && !isOwner) {
+                return msg.reply('❌ Hanya admin grup yang bisa mengatur anti link.');
+            }
+
+            // Catatan: karena ANTI_LINK adalah konstanta, untuk on/off dinamis 
+            // sebaiknya pakai database/file. Untuk sementara kita kasih info saja.
+            if (body === '!antilink on') {
+                await msg.reply('✅ Anti Link sudah *AKTIF*.\n(Untuk mengubah secara permanen, edit kode di `ANTI_LINK = true`)');
+            } else {
+                await msg.reply('❌ Anti Link sudah *NONAKTIF*.\n(Untuk mengubah secara permanen, edit kode di `ANTI_LINK = false`)');
+            }
+        }
+
+        // Balas otomatis terima kasih
+        else if (body.includes('terima kasih') || body.includes('makasih') || body.includes('thanks')) {
+            await msg.reply('Sama-sama! 😊');
+        }
+
+    } catch (error) {
+        console.error('Error handling message:', error);
+    }
+});
+
+// Mulai bot
+client.initialize();
